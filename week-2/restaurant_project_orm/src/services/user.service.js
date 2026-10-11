@@ -35,16 +35,14 @@ const getUsers = async (page = 1, limit = 10) => {
     }
   });
 
-  const total = await prisma.user.count();
+  const totalElements = await prisma.user.count();
 
   return {
     data: users,
-    meta: {
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit)
-    }
+    page,
+    size: limit,
+    totalPages: Math.ceil(totalElements / limit),
+    totalElements
   };
 };
 
