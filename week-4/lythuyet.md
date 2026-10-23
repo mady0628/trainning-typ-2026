@@ -105,3 +105,45 @@ Consumer dùng Offset như một dấu trang để đánh dấu xem mình đã �
 Consumer: Tiến trình kéo (pull) message từ Topic về để xử lý (ví dụ: Worker gửi email).
 
 Consumer Group: Một nhóm các Consumer cùng làm chung một nhiệm vụ. Quy tắc cốt lõi của Kafka: Bên trong 1 Consumer Group, 1 Partition chỉ được giao cho tối đa 1 Consumer đọc tại một thời điểm. (Do đó, số lượng Consumer tối đa chạy hiệu quả trong 1 Group bằng đúng số Partition của Topic).
+
+# IV. Implement
+
+Giả sử trường hợp user đặt bàn xong thì sẽ được gửi 1 email để xác nhận.
+
+![alt text](imgs/\1.png)
+
+Câu lệnh create được thực hiện ngay tức thì 17ms. 
+
+![alt text](imgs/2.png)
+
+Tuy nhiên sau 5.48s thì email mới được gửi. Và gửi email xong thì tổng tốn mất 12.24s
+
+![alt text](imgs/image.png)
+
+
+# V. Các vấn đề cần chú ý khi dùng Message Queue
+
+## 1. Message bị gửi trùng (Duplicate) & Idempotency
+**Nguyên nhân**: Do mạng chập chờn hoặc Consumer xử lý xong nhưng chưa kịp báo ACK thì bị restart, Broker sẽ gửi lại tin nhắn đó lần 2 (cơ chế *At-least-once delivery*).
+**Hậu quả**: Khách hàng có thể bị gửi 2 email xác nhận cho cùng 1 lần đặt bàn.
+**Giải pháp (Idempotency)**: 
+  - Đảm bảo xử lý 1 lần hay nhiều lần đều cho ra kết quả giống nhau.
+  - Consumer kiểm tra mã `reservationId`: Lưu cờ `email_sent = true` trong database hoặc lưu `reservationId` vào Redis cache (kèm TTL). Nếu thấy ID này đã được gửi rồi thì Consumer bỏ qua, không gửi lại nữa.
+## 2. Message bị mất & Cơ chế Acknowledge (ACK)
+**Vấn đề**: Consumer vừa kéo message về nhưng chưa kịp gửi email thì server bị crash / mất điện.
+**Giải pháp**: Cơ chế **Commit Offset (ACK)** trong Kafka:
+  - Chỉ commit offset lên Broker sau khi hàm gửi email đã chạy thành công (`try { sendMail(); commit(); }`).
+  - Nếu gặp lỗi (`catch`), không commit offset. Khi Consumer khởi động lại, nó sẽ đọc lại đúng message đó để gửi lại, đảm bảo không bao giờ bị mất đơn đặt bàn.
+## 3. Consumer chết giữa chừng & Dead Letter Queue (DLQ)
+**Vấn đề**: Nếu email khách hàng bị sai cú pháp hoặc nội dung bị lỗi vĩnh viễn, Consumer sẽ retry liên tục không bao giờ hết (Poison Message), làm tắc nghẽn toàn bộ hàng đợi.
+**Giải pháp**: 
+  - Quy định số lần thử lại tối đa (ví dụ: retry 3 lần).
+  - Nếu sau 3 lần vẫn lỗi, đẩy message đó sang một Topic riêng gọi là **Dead Letter Queue (DLQ)**.
+  - Message trong DLQ sẽ được lưu lại để lập trình viên kiểm tra log thủ công hoặc xử lý cảnh báo, giúp hàng đợi chính tiếp tục xử lý các đơn đặt bàn khác bình thường.
+## 4. Thứ tự Message (Message Ordering)
+**Thứ tự có quan trọng không?**: 
+  - Rất quan trọng trong các luồng có trạng thái kế tiếp nhau: `Đặt bàn (pending)` ➔ `Xác nhận (confirmed)` ➔ `Hủy bàn (cancelled)`. Nếu message Hủy bàn bị xử lý trước message Đặt bàn sẽ dẫn tới sai lệch dữ liệu.
+ **Giải pháp trong Kafka**:
+  - Kafka chỉ đảm bảo thứ tự **bên trong cùng 1 Partition**.
+  - Bằng cách đặt **Message Key là `reservationId`**, tất cả các sự kiện của cùng 1 đơn đặt bàn sẽ luôn được hash vào **cùng một Partition duy nhất**, từ đó đảm bảo Consumer đọc và xử lý chính xác theo đúng thứ tự thời gian.
+
